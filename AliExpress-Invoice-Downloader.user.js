@@ -43,7 +43,10 @@
   }
 
   function sanitizeFileName(name) {
-    const sanitized = name.replace(/[^\x00-\x7F]/g, "").replace(/\s+/g, "_");
+    const sanitized = name
+      .replace(/[^\x00-\x7F]/g, "")
+      .replace(/\s+/g, "_")
+      .replace(/[/\\?%*:|"<>]/g, "_"); // Remove illegal filename characters
     return sanitized.substring(0, 16);
   }
 
