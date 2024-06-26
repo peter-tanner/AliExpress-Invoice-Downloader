@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AliExpress Invoice Downloader
 // @namespace    https://www.aliexpress.com
-// @version      1.0
+// @version      1.1
 // @description  Adds download buttons to the Aliexpress order page (https://www.aliexpress.com/p/order/index.html) and a bulk download button to download all invoices on the order page to save time.
 // @match        https://www.aliexpress.com/p/order/index.html*
 // @grant        GM_download
