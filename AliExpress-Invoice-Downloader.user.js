@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AliExpress Invoice Downloader
 // @namespace    https://www.aliexpress.com
-// @version      1.1
+// @version      1.2
 // @description  Adds download buttons to the Aliexpress order page (https://www.aliexpress.com/p/order/index.html) and a bulk download button to download all invoices on the order page to save time.
 // @match        https://www.aliexpress.com/p/order/index.html*
 // @grant        GM_download
@@ -16,128 +16,101 @@
 (function () {
   "use strict";
 
-  let orderIds = [];
+  let order_ids = [];
 
-  function handleDownloadOrNavigate(link, orderId, name) {
-    const downloadButton = document.createElement("button");
-    downloadButton.textContent = "Download Invoice";
-    downloadButton.className = "aliexpress-invoice-download-button";
-    downloadButton.style.marginLeft = "10px";
-    downloadButton.addEventListener("click", () => {
-      downloadInvoice(orderId, name);
-    });
+  function dl_invoice(orderId, name) {
+    const sanitized_name = name
+      .replace(/[^\x00-\x7F]/g, "")
+      .replace(/\s+/g, "_")
+      .replace(/[/\\?%*:|"<>]/g, "_")
+      .substring(0, 16);
 
-    link.parentNode.appendChild(downloadButton);
-  }
-
-  function downloadInvoice(orderId, name) {
-    const sanitizedFileName = sanitizeFileName(name);
-    const url = `https://trade.aliexpress.com/ajax/invoice/invoiceExportAjax.htm?orderId=${orderId}&name=${sanitizedFileName}`;
+    const url = `https://trade.aliexpress.com/ajax/invoice/invoiceExportAjax.htm?orderId=${orderId}`;
     GM_download({
       url: url,
-      name: `invoice_${orderId}_${sanitizedFileName}.pdf`,
+      name: `invoice_${orderId}_${sanitized_name}.pdf`,
       onerror: function (error) {
         console.error("Error downloading:", error);
       },
     });
   }
 
-  function sanitizeFileName(name) {
-    const sanitized = name
-      .replace(/[^\x00-\x7F]/g, "")
-      .replace(/\s+/g, "_")
-      .replace(/[/\\?%*:|"<>]/g, "_"); // Remove illegal filename characters
-    return sanitized.substring(0, 16);
-  }
+  function create_dl_button(order_elem) {
+    const order_name_elem = order_elem.querySelector(
+      "div.order-item-content-info-name"
+    );
+    const order_name = order_name_elem
+      ? order_name_elem.textContent.trim()
+      : `MULTIPLE_${order_elem.querySelector("div.order-item-store").textContent}`;
+    const order_link = order_elem.querySelector(
+      "div.order-item-header > div.order-item-header-right > a"
+    );
+    if (order_link) {
+      const href = order_link.getAttribute("href");
+      if (href) {
+        const url = new URL(href, window.location.href);
+        const order_id = url.searchParams.get("orderId");
+        if (order_id) {
+          order_ids.push({ id: order_id, name: order_name });
 
-  function addDownloadAllButton() {
-    const downloadAllButton = document.createElement("button");
-    downloadAllButton.textContent = "Download All Invoices";
-    downloadAllButton.className = "aliexpress-download-all-button";
-    downloadAllButton.style.position = "fixed";
-    downloadAllButton.style.bottom = "10px";
-    downloadAllButton.style.left = "10px";
-    downloadAllButton.style.zIndex = "1000";
-    downloadAllButton.style.backgroundColor = "red";
-    downloadAllButton.style.color = "white";
-    downloadAllButton.style.padding = "10px";
-    downloadAllButton.style.border = "none";
-    downloadAllButton.style.cursor = "pointer";
-    downloadAllButton.addEventListener("click", () => {
-      orderIds.forEach((order) => {
-        downloadInvoice(order.orderId, order.name);
-      });
-    });
-
-    document.body.appendChild(downloadAllButton);
-  }
-
-  function createDownloadButtons() {
-    const invoiceItems = document.querySelectorAll("div.order-item");
-    invoiceItems.forEach((item) => {
-      const nameElement = item.querySelector(
-        "div.order-item-content-info-name"
-      );
-      const name = nameElement ? nameElement.textContent.trim() : "";
-      const link = item.querySelector(
-        "div.order-item-header > div.order-item-header-right > a"
-      );
-      if (link) {
-        const href = link.getAttribute("href");
-        if (href) {
-          const url = new URL(href, window.location.href);
-          const orderId = url.searchParams.get("orderId");
-          if (orderId) {
-            orderIds.push({ orderId: orderId, name: name });
-            handleDownloadOrNavigate(link, orderId, name);
-          }
+          const dl_button = document.createElement("button");
+          dl_button.textContent = "Download Invoice";
+          dl_button.className = "aliexpress-invoice-download-button";
+          dl_button.style.marginLeft = "10px";
+          dl_button.addEventListener("click", () => {
+            dl_invoice(order_id, order_name);
+          });
+          order_link.parentNode.appendChild(dl_button);
         }
       }
-    });
+    }
   }
 
-  const observerCallback = (mutationsList) => {
-    for (let mutation of mutationsList) {
+  const invoice_mut_cb = (mutations) => {
+    for (let mutation of mutations) {
       if (mutation.type === "childList") {
-        const addedNodes = mutation.addedNodes;
-        addedNodes.forEach((node) => {
-          if (node.matches && node.matches("div.order-item")) {
-            const nameElement = node.querySelector(
-              "div.order-item-content-info-name"
-            );
-            const name = nameElement ? nameElement.textContent.trim() : "";
-            const link = node.querySelector(
-              "div.order-item-header > div.order-item-header-right > a"
-            );
-            if (link) {
-              const href = link.getAttribute("href");
-              if (href) {
-                const url = new URL(href, window.location.href);
-                const orderId = url.searchParams.get("orderId");
-                if (orderId) {
-                  orderIds.push({ orderId: orderId, name: name });
-                  handleDownloadOrNavigate(link, orderId, name);
-                }
-              }
-            }
+        mutation.addedNodes.forEach((order_elem) => {
+          if (order_elem.matches && order_elem.matches("div.order-item")) {
+            create_dl_button(order_elem)
           }
         });
       }
     }
   };
 
-  const startObserverWhenReady = () => {
-    const targetNode = document.querySelector("div.comet-checkbox-group");
+  const add_invoice_mut_observer = () => {
+    const targetNode = document.querySelector("div.order-content");
     if (targetNode) {
-      const observer = new MutationObserver(observerCallback);
+      const observer = new MutationObserver(invoice_mut_cb);
       const config = { childList: true, subtree: true };
       observer.observe(targetNode, config);
+
+      // force create for initially rendered orders 
+      const order_elems = document.querySelectorAll("div.order-item");
+      order_elems.forEach((order_elem) => {
+        create_dl_button(order_elem)
+      });
     } else {
-      setTimeout(startObserverWhenReady, 100);
+      setTimeout(add_invoice_mut_observer, 100);
     }
   };
 
-  startObserverWhenReady();
-  addDownloadAllButton();
-  createDownloadButtons();
+  add_invoice_mut_observer();
+
+  const bulk_dl_button = document.createElement("button");
+  bulk_dl_button.textContent = "Download All Invoices";
+  bulk_dl_button.style.position = "fixed";
+  bulk_dl_button.style.bottom = "10px";
+  bulk_dl_button.style.left = "10px";
+  bulk_dl_button.style.zIndex = "1000";
+  bulk_dl_button.style.backgroundColor = "red";
+  bulk_dl_button.style.color = "white";
+  bulk_dl_button.style.padding = "10px";
+  bulk_dl_button.addEventListener("click", () => {
+    order_ids.forEach((order) => {
+      dl_invoice(order.orderId, order.name);
+    });
+  });
+  document.body.appendChild(bulk_dl_button);
+
 })();
