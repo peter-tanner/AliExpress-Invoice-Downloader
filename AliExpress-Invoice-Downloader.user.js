@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AliExpress Invoice Downloader
 // @namespace    https://www.aliexpress.com
-// @version      1.4
+// @version      1.5
 // @description  Adds download buttons to the Aliexpress order page (https://www.aliexpress.com/p/order/index.html) and a bulk download button to download all invoices on the order page to save time.
 // @match        https://www.aliexpress.com/p/order/index.html*
 // @grant        GM_download
@@ -23,11 +23,11 @@
       .replace(/[^\x00-\x7F]/g, "")
       .replace(/\s+/g, "_")
       .replace(/[/\\?%*:|"<>]/g, "_")
-      .substring(0, 16);
+      .substring(0, 32);
     sanitized_name = date === null
       ? `invoice_${order_id}_${sanitized_name}.pdf`
       : `invoice_${date}_${order_id}_${sanitized_name}.pdf`
-
+    console.info(`Downloading invoice for ${sanitized_name}`);
     const url = `https://trade.aliexpress.com/ajax/invoice/invoiceExportAjax.htm?orderId=${order_id}`;
     GM_download({
       url: url,
@@ -142,8 +142,9 @@
   bulk_dl_button.style.color = "white";
   bulk_dl_button.style.padding = "10px";
   bulk_dl_button.addEventListener("click", () => {
-    order_ids.forEach((order) => {
-      dl_invoice(order.date, order.id, order.name);
+    order_ids.forEach((order, i) => {
+      // some downloaded invoices have a bad response if all done concurrently
+      setTimeout(() => dl_invoice(order.date, order.id, order.name), 1000 * i);
     });
   });
   document.body.appendChild(bulk_dl_button);
