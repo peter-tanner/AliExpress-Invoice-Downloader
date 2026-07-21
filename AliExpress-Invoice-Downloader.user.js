@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         AliExpress Invoice Downloader
 // @namespace    https://www.aliexpress.com
-// @version      1.5
-// @description  Adds download buttons to the Aliexpress order page (https://www.aliexpress.com/p/order/index.html) and a bulk download button to download all invoices on the order page to save time.
+// @version      2.0
+// @description  Downloads order receipts from AliExpress. The old invoiceExportAjax.htm endpoint was shut down ("page under maintenance"); this version automates the current flow: order detail page -> "Receipt" button -> tax-ui modal -> Download (PNG). Adds per-order buttons and a bulk downloader to the order list.
 // @match        https://www.aliexpress.com/p/order/index.html*
-// @grant        GM_download
+// @match        https://www.aliexpress.com/p/order/detail.html*
+// @grant        none
 // @author       Peter Tanner
 // @namespace    https://github.com/peter-tanner/AliExpress-Invoice-Downloader/
 // @supportURL   https://github.com/peter-tanner/AliExpress-Invoice-Downloader/issues
@@ -13,140 +14,117 @@
 // @website      https://www.petertanner.dev/
 // ==/UserScript==
 
+// Rewritten 2026: trade.aliexpress.com/ajax/invoice/invoiceExportAjax.htm is dead
+// (redirects to error.htm / "page under maintenance", see issues #1-#3).
+// Current working flow (verified on de-DE and en-US):
+//   detail page -> button [data-pl="order_block_btn"] with text "Receipt"
+//   -> same-origin iframe /p/tax-ui/index.html -> click #download-receipt
+//   -> browser downloads "OrderSummary<date><orderId>.png"
+// Orders that were refunded/cancelled have no Receipt button.
+
 (function () {
   "use strict";
 
-  let order_ids = [];
+  const AUTO_FLAG = "ali-inv-dl";
+  const RECEIPT_TEXTS = /^(receipt|beleg|rechnung|recibo|reçu|fatura)$/i;
 
-  const dl_invoice = (date, order_id, name) => {
-    var sanitized_name = name
-      .replace(/[^\x00-\x7F]/g, "")
-      .replace(/\s+/g, "_")
-      .replace(/[/\\?%*:|"<>]/g, "_")
-      .substring(0, 32);
-    sanitized_name = date === null
-      ? `invoice_${order_id}_${sanitized_name}.pdf`
-      : `invoice_${date}_${order_id}_${sanitized_name}.pdf`
-    console.info(`Downloading invoice for ${sanitized_name}`);
-    const url = `https://trade.aliexpress.com/ajax/invoice/invoiceExportAjax.htm?orderId=${order_id}`;
-    GM_download({
-      url: url,
-      name: sanitized_name,
-      onerror: function (error) {
-        console.error("Aliexpress invoice downloader: Error downloading:", error);
-      },
-    });
-  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // annoyingly they do not provide the date as an iso string or unix timestamp, but as a localized string
-  // only consider english strings.
-  const convert_date_str = (date_str) => {
-    const date_str_conv = date_str.replace("Order date: ", "")
-      .replace(",", "")
-      .replace("Jan", "01")
-      .replace("Feb", "02")
-      .replace("Mar", "03")
-      .replace("Apr", "04")
-      .replace("May", "05")
-      .replace("Jun", "06")
-      .replace("Jul", "07")
-      .replace("Aug", "08")
-      .replace("Sep", "09")
-      .replace("Oct", "10")
-      .replace("Nov", "11")
-      .replace("Dec", "12")
-
-    const date_split = date_str_conv.split(' ')
-
-    if (/[^0-9\s]/.test(date_str_conv)) {
-      console.error("Aliexpress invoice downloader: date only interpreted in english.")
-      return null
-    } else {
-      return `${date_split[2]}-${date_split[0]}-${date_split[1]}`
+  // ------------------- detail page: perform the download -------------------
+  async function autoDownloadOnDetail() {
+    let btn = null;
+    for (let i = 0; i < 30 && !btn; i++) {
+      btn = [...document.querySelectorAll("button, a")].find((b) =>
+        RECEIPT_TEXTS.test((b.textContent || "").trim())
+      );
+      if (!btn) await sleep(1000);
     }
-  }
+    if (!btn) {
+      console.error("[ali-inv-dl] no Receipt button (order refunded/cancelled?)");
+      return false;
+    }
+    btn.click();
 
-  const create_dl_button = (order_elem) => {
-    const order_name_elem = order_elem.querySelector(
-      "div.order-item-content-info-name"
-    );
-    const order_name = order_name_elem
-      ? order_name_elem.textContent.trim()
-      : `MULTIPLE_${order_elem.querySelector("div.order-item-store").textContent}`;
-    const order_link = order_elem.querySelector(
-      "div.order-item-header > div.order-item-header-right > a"
-    ) || order_elem;
-    if (order_link) {
-      const href = order_link.getAttribute("href");
-      const order_header_elem = order_elem.querySelector("div.order-item-header");
-      if (href) {
-        const date_elem = order_header_elem.querySelector("div.order-item-header-right-info > div") || order_header_elem.querySelector("div.order-item-header-right")
-        const date = convert_date_str(date_elem.textContent);
-        const url = new URL(href, window.location.href);
-        const order_id = url.searchParams.get("orderId");
-        if (order_id) {
-          order_ids.push({ id: order_id, name: order_name, date: date });
-
-          const dl_button = document.createElement("button");
-          dl_button.textContent = "Download Invoice";
-          dl_button.className = "aliexpress-invoice-download-button";
-          dl_button.style.marginLeft = "10px";
-          dl_button.addEventListener("click", (e) => {
-            e.preventDefault(); // mobile interface where <a> covers whole item
-            dl_invoice(date, order_id, order_name);
-          });
-          order_header_elem.appendChild(dl_button);
+    // wait for the same-origin tax-ui iframe and its download button
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      for (const frame of document.querySelectorAll("iframe")) {
+        try {
+          const doc = frame.contentDocument;
+          if (!doc) continue;
+          const dl =
+            doc.querySelector("#download-receipt") ||
+            [...doc.querySelectorAll("a, button, div")].find((e) =>
+              /^(download|herunterladen)$/i.test((e.textContent || "").trim())
+            );
+          if (dl) {
+            dl.click();
+            console.info("[ali-inv-dl] receipt download triggered");
+            return true;
+          }
+        } catch (e) {
+          /* cross-origin frame -> ignore */
         }
       }
     }
+    console.error("[ali-inv-dl] download button not found in tax-ui frame");
+    return false;
   }
 
-  const invoice_mut_cb = (mutations) => {
-    for (let mutation of mutations) {
-      if (mutation.type === "childList") {
-        mutation.addedNodes.forEach((order_elem) => {
-          if (order_elem.matches && order_elem.matches("div.order-item,a.order-item.order-item-mobile")) {
-            create_dl_button(order_elem)
-          }
-        });
-      }
+  // ------------------- order list: add buttons -------------------
+  function orderIdOf(orderElem) {
+    for (const a of orderElem.querySelectorAll("a")) {
+      const m = (a.getAttribute("href") || "").match(/orderId=(\d{10,})/);
+      if (m) return m[1];
     }
-  };
+    return null;
+  }
 
-  const add_invoice_mut_observer = () => {
-    const targetNode = document.querySelector("div.order-content");
-    if (targetNode) {
-      const observer = new MutationObserver(invoice_mut_cb);
-      const config = { childList: true, subtree: true };
-      observer.observe(targetNode, config);
+  const detailUrl = (orderId) =>
+    "https://www.aliexpress.com/p/order/detail.html?orderId=" + orderId + "#" + AUTO_FLAG;
 
-      // force create for initially rendered orders
-      const order_elems = document.querySelectorAll("div.order-item,a.order-item.order-item-mobile");
-      order_elems.forEach((order_elem) => {
-        create_dl_button(order_elem)
-      });
-    } else {
-      setTimeout(add_invoice_mut_observer, 100);
-    }
-  };
-
-  add_invoice_mut_observer();
-
-  const bulk_dl_button = document.createElement("button");
-  bulk_dl_button.textContent = "Download All Invoices";
-  bulk_dl_button.style.position = "fixed";
-  bulk_dl_button.style.bottom = "10px";
-  bulk_dl_button.style.left = "10px";
-  bulk_dl_button.style.zIndex = "1000";
-  bulk_dl_button.style.backgroundColor = "red";
-  bulk_dl_button.style.color = "white";
-  bulk_dl_button.style.padding = "10px";
-  bulk_dl_button.addEventListener("click", () => {
-    order_ids.forEach((order, i) => {
-      // some downloaded invoices have a bad response if all done concurrently
-      setTimeout(() => dl_invoice(order.date, order.id, order.name), 1000 * i);
+  function addButtons() {
+    document.querySelectorAll(".order-item").forEach((order) => {
+      if (order.dataset.aliInvDl) return;
+      const oid = orderIdOf(order);
+      if (!oid) return;
+      order.dataset.aliInvDl = "1";
+      const btn = document.createElement("button");
+      btn.textContent = "⭳ Receipt";
+      btn.style.cssText =
+        "margin:4px;padding:2px 10px;cursor:pointer;border:1px solid #d3d3d3;border-radius:12px;background:#fff;";
+      btn.onclick = () => window.open(detailUrl(oid), "_blank");
+      (order.querySelector(".order-item-btns") || order).appendChild(btn);
     });
-  });
-  document.body.appendChild(bulk_dl_button);
 
+    if (!document.getElementById("ali-inv-dl-all")) {
+      const all = document.createElement("button");
+      all.id = "ali-inv-dl-all";
+      all.textContent = "⭳ DOWNLOAD ALL RECEIPTS";
+      all.style.cssText =
+        "position:fixed;bottom:16px;left:16px;z-index:99999;padding:10px 16px;background:#c00;color:#fff;border:none;border-radius:8px;cursor:pointer;";
+      all.onclick = async () => {
+        const ids = [...document.querySelectorAll(".order-item")]
+          .map(orderIdOf)
+          .filter(Boolean);
+        all.disabled = true;
+        for (let i = 0; i < ids.length; i++) {
+          all.textContent = `⭳ ${i + 1}/${ids.length} ...`;
+          const w = window.open(detailUrl(ids[i]), "_blank");
+          await sleep(15000); // load + click-through + download time
+          try { if (w) w.close(); } catch (e) {}
+        }
+        all.textContent = "⭳ DONE";
+        all.disabled = false;
+      };
+      document.body.appendChild(all);
+    }
+  }
+
+  // ------------------- entry -------------------
+  if (location.pathname.includes("/p/order/detail.html")) {
+    if (location.hash.includes(AUTO_FLAG)) autoDownloadOnDetail();
+  } else {
+    setInterval(addButtons, 2000);
+  }
 })();
